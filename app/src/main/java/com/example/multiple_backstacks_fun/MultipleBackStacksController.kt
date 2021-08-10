@@ -4,8 +4,6 @@ import android.os.Bundle
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.OnBackPressedDispatcher
 import androidx.fragment.app.FragmentManager
-import androidx.fragment.app.commit
-import androidx.fragment.app.replace
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -17,16 +15,17 @@ class MultipleBackStacksController(
     private val fragmentManager: FragmentManager,
     private val onBackPressedDispatcher: OnBackPressedDispatcher,
     private val lifecycleOwner: LifecycleOwner,
-    private val primaryTab: String
+    private val backPressedOnStackRoot: (String) -> Unit
 ) : SavedStateRegistry.SavedStateProvider {
-    private var currentTab: String = primaryTab
-    // Keeps track of added tab root Fragment names. FragmentManager.findFragmentByX isn't convenient
+    private var currentStack: String? = null
+    // Keeps track of stack root names. FragmentManager.findFragmentByX isn't convenient
     // here because FragmentManager.save/restoreBackStack are asynchronous, and executing
     // pending transactions before querying makes for inconvenient code and less atomic Fragment
     // transactions.
-    private val addedTabRoots = mutableSetOf<String>()
+    private val stackRootNames = mutableSetOf<String>()
 
     init {
+        // Wait for registry to be in created state - otherwise it will throw.
         registryOwner.lifecycle.doOnEvent(Lifecycle.Event.ON_CREATE) {
             setUp()
         }
@@ -34,17 +33,19 @@ class MultipleBackStacksController(
 
     private fun setUp() {
         registryOwner.savedStateRegistry.registerSavedStateProvider("controller", this)
+
+        // Restore any state across config changes
         val state = registryOwner.savedStateRegistry.consumeRestoredStateForKey("controller")
         if (state != null) {
-            currentTab = state.getString("currentTab", primaryTab)
-            val savedTabRoots = state.getStringArray("addedTabRoots").orEmpty()
-            addedTabRoots.addAll(savedTabRoots.toList())
+            currentStack = state.getString("currentStack", null)
+            val savedStackRootNames = state.getStringArray("stacks").orEmpty()
+            stackRootNames.addAll(savedStackRootNames.toList())
         }
 
-        // Navigates to primary tab when a non-primary tab is backed out of.
         val backPress = object : OnBackPressedCallback(canHandleBackPress()) {
             override fun handleOnBackPressed() {
-                onTabClicked(primaryTab, isStartDestination = true)
+                isEnabled = false
+                backPressedOnStackRoot(requireNotNull(currentStack))
             }
         }
 
@@ -55,47 +56,29 @@ class MultipleBackStacksController(
         }
     }
 
+    private fun canHandleBackPress(): Boolean {
+        return fragmentManager.backStackEntryCount == 1
+    }
+
     override fun saveState(): Bundle {
         return Bundle().apply {
-            putString("currentTab", currentTab)
-            putStringArray("addedTabRoots", addedTabRoots.toTypedArray())
+            putString("currentStack", currentStack)
+            putStringArray("stacks", stackRootNames.toTypedArray())
         }
     }
 
-    // Determines whether a back press should navigate to the primary tab. Non-primary tabs
-    // should keep their root tab in the back stack if they exist.
-    private fun canHandleBackPress(): Boolean {
-        return fragmentManager.backStackEntryCount == 1 && currentTab != primaryTab
-    }
-
-    fun onTabClicked(tab: String, isStartDestination: Boolean) {
-        val prevTab = currentTab
-        currentTab = tab
-        fragmentManager.saveBackStack(prevTab)
-        fragmentManager.restoreBackStack(tab)
-
-        if (tab !in addedTabRoots) {
-            addedTabRoots += tab
-            addFragment(tab, 1, addToBackStack = !isStartDestination)
+    fun onStackClicked(name: String, createStack: () -> Unit) {
+        val prevStack = currentStack
+        currentStack = name
+        if (prevStack != null) {
+            fragmentManager.saveBackStack(prevStack)
         }
-    }
+        fragmentManager.restoreBackStack(name)
 
-    private fun addFragment(tab: String, stack: Int, addToBackStack: Boolean = true) {
-        fragmentManager.commit {
-            setReorderingAllowed(true)
-            replace<MyFragment>(
-                containerViewId = R.id.container,
-                tag = tab,
-                args = MyFragment.args(tab, stack)
-            )
-            if (addToBackStack) {
-                addToBackStack(tab)
-            }
+        if (name !in stackRootNames) {
+            stackRootNames += name
+            createStack()
         }
-    }
-
-    fun addToCurrentFragmentStack(stack: Int) {
-        addFragment(currentTab, stack)
     }
 
     private fun Lifecycle.doOnEvent(which: Lifecycle.Event, block: () -> Unit) {
@@ -108,9 +91,5 @@ class MultipleBackStacksController(
         }
 
         addObserver(observer)
-    }
-
-    companion object {
-        private const val primaryTab = "first"
     }
 }
